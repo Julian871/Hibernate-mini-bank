@@ -1,120 +1,150 @@
 package sorokin.java.course.account;
 
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.Transaction;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.springframework.stereotype.Component;
-import sorokin.java.course.account.Account;
-import sorokin.java.course.user.User;
+import sorokin.java.course.entity.Account;
+import sorokin.java.course.entity.User;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.Objects;
+import java.util.function.Supplier;
 
 @Component
 public class AccountService {
 
-    private int idCounter;
-    private final Map<Integer, Account> accountMap;
     private final AccountProperties accountProperties;
+    private final SessionFactory sessionFactory;
 
-    public AccountService(AccountProperties accountProperties) {
-        this.idCounter = 0;
-        this.accountMap = new HashMap<>();
+    public AccountService(AccountProperties accountProperties, SessionFactory sessionFactory) {
         this.accountProperties = accountProperties;
+        this.sessionFactory = sessionFactory;
     }
 
     public Account createAccount(User user) {
         if (user == null) {
             throw new IllegalArgumentException("user must not be null");
         }
-        idCounter++;
-        Account newAccount = new Account(idCounter, user.getId(), accountProperties.getDefaultAmount());
-        accountMap.put(idCounter, newAccount);
-        return newAccount;
+
+        return executeInTransactionOrJoin(() -> {
+            Account account = new Account(accountProperties.getDefaultAmount(), user);
+            sessionFactory.getCurrentSession().persist(account);
+            user.addAccount(account);
+            sessionFactory.getCurrentSession().merge(user);
+            return account;
+        });
     }
 
-    public Optional<Account> findAccountById(Integer id) {
-        validatePositiveId(id, "account id");
-        return Optional.ofNullable(accountMap.get(id));
-    }
-
-    public List<Account> getUserAccounts(Integer userId) {
-        return accountMap.values().stream()
-                .filter(it -> userId.equals(it.getUserId()))
-                .toList();
-    }
-
-    public void withdraw(Integer fromAccountId, Integer amount) {
+    public void withdraw(Long fromAccountId, Integer amount) {
         validatePositiveId(fromAccountId, "account id");
         validatePositiveAmount(amount);
-        Account account = findAccountById(fromAccountId)
-                .orElseThrow(() -> new IllegalArgumentException("No such account: id=%s".formatted(fromAccountId)));
 
-        if (amount > account.getMoneyAmount()) {
-            throw new IllegalArgumentException(
-                    "insufficient funds on account id=%s, moneyAmount=%s, attempted withdraw=%s"
-                            .formatted(account.getId(), account.getMoneyAmount(), amount)
-            );
-        }
-        account.setMoneyAmount(account.getMoneyAmount() - amount);
+        executeInTransactionOrJoin(() -> {
+            Account account = sessionFactory.getCurrentSession().get(Account.class, fromAccountId);
+            if(account == null) throw new IllegalArgumentException("No such account: id=%s".formatted(fromAccountId));
+
+            if (amount > account.getMoneyAmount()) {
+                throw new IllegalArgumentException(
+                        "insufficient funds on account id=%s, moneyAmount=%s, attempted withdraw=%s"
+                                .formatted(account.getId(), account.getMoneyAmount(), amount)
+                );
+            }
+
+            account.setMoneyAmount(account.getMoneyAmount() - amount);
+            sessionFactory.getCurrentSession().merge(account);
+            return null;
+        });
     }
 
-    public void deposit(Integer toAccountId, Integer amount) {
+    public void deposit(Long toAccountId, Integer amount) {
         validatePositiveId(toAccountId, "account id");
         validatePositiveAmount(amount);
-        Account account = findAccountById(toAccountId)
-                .orElseThrow(() -> new IllegalArgumentException("No such account: id=%s".formatted(toAccountId)));
 
-        account.setMoneyAmount(account.getMoneyAmount() + amount);
+        executeInTransactionOrJoin(() -> {
+            Account account = sessionFactory.getCurrentSession().get(Account.class, toAccountId);
+            if(account == null) throw new IllegalArgumentException("No such account: id=%s".formatted(toAccountId));
+
+            account.setMoneyAmount(account.getMoneyAmount() + amount);
+            sessionFactory.getCurrentSession().merge(account);
+            return null;
+        });
     }
 
-    public Account closeAccount(Integer accountId) {
+    public void closeAccount(Long accountId) {
         validatePositiveId(accountId, "account id");
-        Account accountToClose = findAccountById(accountId)
-                .orElseThrow(() -> new IllegalArgumentException("No such account: id=%s".formatted(accountId)));
-        var userId = accountToClose.getUserId();
-        var userAccounts = getUserAccounts(userId);
-        if (userAccounts.size() == 1) {
-            throw new IllegalStateException("Can't close the only one account");
-        }
-        accountMap.remove(accountId);
 
-        var accountToTransferMoney = userAccounts.stream()
-                .filter(it -> it.getId() != accountId)
-                .findFirst()
-                .orElseThrow();
+        executeInTransactionOrJoin(() -> {
+            String hql = "SELECT a FROM Account a LEFT JOIN FETCH a.user WHERE a.id = :id";
 
-        var newAmount = accountToTransferMoney.getMoneyAmount() + accountToClose.getMoneyAmount();
-        accountToTransferMoney.setMoneyAmount(newAmount);
-        return accountToClose;
+            Account account = sessionFactory.getCurrentSession()
+                    .createQuery(hql, Account.class)
+                    .setParameter("id", accountId)
+                    .getSingleResult();
+
+            if (account == null) throw new IllegalArgumentException("No such account: id=%s".formatted(accountId));
+
+            if (account.getUser().getAccounts().size() == 1) {
+                throw new IllegalStateException("Can't close the only one account");
+            }
+
+            Account accountToTransferMoney = account.getUser().getAccounts().stream()
+                    .filter(a -> !a.getId().equals(accountId))
+                    .findFirst()
+                    .orElseThrow();
+
+            accountToTransferMoney.setMoneyAmount(accountToTransferMoney.getMoneyAmount() + account.getMoneyAmount());
+
+            sessionFactory.getCurrentSession().merge(accountToTransferMoney);
+            sessionFactory.getCurrentSession().remove(account);
+
+            account.getUser().getAccounts().remove(account);
+            sessionFactory.getCurrentSession().merge(account.getUser());
+            return null;
+        });
     }
 
-    public void transfer(int fromAccountId, int toAccountId, int amount) {
+    public void transfer(Long fromAccountId, Long toAccountId, int amount) {
         validatePositiveId(fromAccountId, "source account id");
         validatePositiveId(toAccountId, "target account id");
-        validatePositiveAmount(amount);
-        if (fromAccountId == toAccountId) {
+        if (fromAccountId.equals(toAccountId)) {
             throw new IllegalArgumentException("source and target account id must be different");
         }
-        Account accountFrom = findAccountById(fromAccountId)
-                .orElseThrow(() -> new IllegalArgumentException("No such account: id=%s".formatted(fromAccountId)));
-        Account accountTo = findAccountById(toAccountId)
-                .orElseThrow(() -> new IllegalArgumentException("No such account: id=%s".formatted(toAccountId)));
 
-        if (amount > accountFrom.getMoneyAmount()) {
-            throw new IllegalArgumentException(
-                    "insufficient funds on account id=%s, moneyAmount=%s, attempted transfer=%s"
-                            .formatted(accountFrom.getId(), accountFrom.getMoneyAmount(), amount)
-            );
-        }
-        accountFrom.setMoneyAmount(accountFrom.getMoneyAmount() - amount);
+        executeInTransactionOrJoin(() -> {
+            String hql = "SELECT a FROM Account a LEFT JOIN FETCH a.user WHERE a.id = :id";
+            Account accountFrom = sessionFactory.getCurrentSession()
+                    .createQuery(hql, Account.class)
+                    .setParameter("id", fromAccountId)
+                    .getSingleResult();
 
-        int amountToTransfer = accountTo.getUserId() == accountFrom.getUserId()
-                ? amount
-                : (int) Math.round(amount * (1 - accountProperties.getTransferCommission()));
-        accountTo.setMoneyAmount(accountTo.getMoneyAmount() + amountToTransfer);
+            if(accountFrom == null) throw new IllegalArgumentException("No such account: id=%s".formatted(fromAccountId));
+            if (amount > accountFrom.getMoneyAmount()) {
+                throw new IllegalArgumentException(
+                        "insufficient funds on account id=%s, moneyAmount=%s, attempted transfer=%s"
+                                .formatted(accountFrom.getId(), accountFrom.getMoneyAmount(), amount)
+                );
+            }
+
+            Account accountTo = sessionFactory.getCurrentSession()
+                    .createQuery(hql, Account.class)
+                    .setParameter("id", toAccountId)
+                    .getSingleResult();
+            if(accountTo == null) throw new IllegalArgumentException("No such account: id=%s".formatted(toAccountId));
+
+            accountFrom.setMoneyAmount(accountFrom.getMoneyAmount() - amount);
+            sessionFactory.getCurrentSession().merge(accountFrom);
+
+            int amountToTransfer = Objects.equals(accountTo.getUser().getId(), accountFrom.getUser().getId())
+                    ? amount
+                    : (int) Math.round(amount * (1 - accountProperties.getTransferCommission()));
+            accountTo.setMoneyAmount(accountTo.getMoneyAmount() + amountToTransfer);
+            sessionFactory.getCurrentSession().merge(accountTo);
+            return null;
+        });
     }
 
-    private void validatePositiveId(Integer id, String fieldName) {
+    private void validatePositiveId(Long id, String fieldName) {
         if (id == null || id <= 0) {
             throw new IllegalArgumentException(fieldName + " must be > 0");
         }
@@ -123,6 +153,31 @@ public class AccountService {
     private void validatePositiveAmount(Integer amount) {
         if (amount == null || amount <= 0) {
             throw new IllegalArgumentException("amount must be > 0");
+        }
+    }
+
+    private <T> T executeInTransactionOrJoin(Supplier<T> action) {
+        Session session = sessionFactory.getCurrentSession();
+        Transaction tx = session.getTransaction();
+        boolean owner = tx.getStatus() == TransactionStatus.NOT_ACTIVE;
+        if (owner) {
+            tx = session.beginTransaction();
+        }
+        try {
+            T result = action.get();
+            if (owner) {
+                tx.commit();
+            }
+            return result;
+        } catch (RuntimeException e) {
+            if (owner) {
+                tx.rollback();
+            }
+            throw e;
+        } finally {
+            if (owner) {
+                session.close();
+            }
         }
     }
 }

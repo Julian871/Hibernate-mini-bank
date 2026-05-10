@@ -21,7 +21,7 @@ public class CreateUserCommand implements OperationCommand {
     public void execute() {
         String login = consoleInput.readRequiredString("Enter login:", "login");
         var user = userService.createUser(login);
-        System.out.println("User created: " + user);
+        System.out.println("User created: " + user.getId());
     }
 
     @Override
