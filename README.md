@@ -1,6 +1,6 @@
 # MiniBank (Spring Core)
 
-Консольное учебное банковское приложение на Java + Spring Core.
+Консольное учебное банковское приложение на Java + Spring Core + Hibernate.
 
 ## Что умеет
 - создавать пользователей;
@@ -15,11 +15,13 @@
 - Java 21
 - Spring Core (`spring-context`)
 - Конфигурация через `@Configuration`, `@PropertySource`, `@Component`
-- Хранение данных в памяти (`Map`)
+- Hibernate ORM
+- PostgreSQL
 
 ## Архитектура
-- `User`, `Account` — POJO-модели.
-- `UserService`, `AccountService` — бизнес-логика и хранение данных.
+- `User`, `Account` — Hibernate-сущности (`@Entity`).
+- `UserService`, `AccountService` — бизнес-логика и сохранение данных в БД через Hibernate.
+- `SessionFactory` настраивается вручную.
 - `OperationCommand` + `ConsoleOperationType` — обработка команд (Command pattern).
 - `OperationsConsoleListener` — главный цикл приложения.
 - `ConsoleInput` — единая точка чтения/валидации консольного ввода.
@@ -40,6 +42,15 @@
 ```properties
 account.default-amount=500
 account.transfer-commission=0.02
+db.driver=org.postgresql.Driver
+db.url=jdbc:postgresql://localhost:5432/bank
+db.username=postgres
+db.password=root
+db.dialect=org.hibernate.dialect.PostgreSQLDialect
+hibernate.current_session_context_class=thread
+hibernate.hbm2ddl.auto=update
+hibernate.show_sql=true
+hibernate.format_sql=true
 ```
 
 ## Запуск
@@ -47,7 +58,12 @@ account.transfer-commission=0.02
 ```bash
 mvn clean package
 ```
-2. Запустить:
+2. Запуск БД:
+```
+docker run --name my-postgres -p 5432:5432 -e POSTGRES_DB=bank -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=root -d postgres
+```
+
+3.Запустить:
 ```bash
 mvn exec:java -Dexec.mainClass="sorokin.java.course.Main"
 ```

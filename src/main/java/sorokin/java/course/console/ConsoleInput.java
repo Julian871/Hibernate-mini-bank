@@ -46,6 +46,27 @@ public class ConsoleInput {
         }
     }
 
+    public long readPositiveLong(String prompt, String fieldName) {
+        while (true) {
+            System.out.println(prompt);
+            String value = scanner.nextLine().trim();
+            if (value.isBlank()) {
+                System.out.println("Error: " + fieldName + " must not be blank");
+                continue;
+            }
+            try {
+                long parsed = Long.parseLong(value);
+                if (parsed <= 0) {
+                    System.out.println("Error: " + fieldName + " must be > 0");
+                    continue;
+                }
+                return parsed;
+            } catch (NumberFormatException e) {
+                System.out.println("Error: " + fieldName + " must be a number");
+            }
+        }
+    }
+
     public int readPositiveInt(String prompt, String fieldName) {
         while (true) {
             System.out.println(prompt);
